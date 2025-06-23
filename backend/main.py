@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException, Depends, File, UploadFile
 from sqlalchemy import Column, Integer, String, create_engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
@@ -8,6 +8,8 @@ from jose import JWTError, jwt
 from datetime import datetime, timedelta
 from fastapi.security import OAuth2PasswordBearer
 from fastapi import status
+from typing import List, Optional
+import os
 
 app = FastAPI()
 
@@ -45,6 +47,28 @@ class UserOut(BaseModel):
 class Token(BaseModel):
     access_token: str
     token_type: str
+
+class Feed(Base):
+    __tablename__ = "feeds"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, nullable=False)
+    content = Column(String, nullable=True)
+    image_url = Column(String, nullable=True)
+    created_at = Column(String, default=lambda: datetime.utcnow().isoformat())
+    updated_at = Column(String, default=lambda: datetime.utcnow().isoformat())
+
+class FeedCreate(BaseModel):
+    content: Optional[str] = None
+
+class FeedOut(BaseModel):
+    id: int
+    user_id: int
+    content: Optional[str] = None
+    image_url: Optional[str] = None
+    created_at: str
+    updated_at: str
+    class Config:
+        from_attributes = True
 
 def get_db():
     db = SessionLocal()
@@ -121,4 +145,86 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = De
 # 인증 테스트용 엔드포인트
 @app.get("/me", response_model=UserOut)
 async def read_users_me(current_user: User = Depends(get_current_user)):
-    return current_user 
+    return current_user
+
+# 게시글 작성
+@app.post("/feeds", response_model=FeedOut)
+async def create_feed(
+    content: Optional[str] = None,
+    image: UploadFile = File(None),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    image_url = None
+    if image:
+        upload_dir = "uploads"
+        os.makedirs(upload_dir, exist_ok=True)
+        file_path = os.path.join(upload_dir, image.filename)
+        with open(file_path, "wb") as f:
+            f.write(await image.read())
+        image_url = f"/{file_path}"
+    now = datetime.utcnow().isoformat()
+    db_feed = Feed(
+        user_id=current_user.id,
+        content=content,
+        image_url=image_url,
+        created_at=now,
+        updated_at=now
+    )
+    db.add(db_feed)
+    db.commit()
+    db.refresh(db_feed)
+    return db_feed
+
+# 게시글 전체 조회
+@app.get("/feeds", response_model=List[FeedOut])
+async def get_feeds(skip: int = 0, limit: int = 20, db: Session = Depends(get_db)):
+    return db.query(Feed).order_by(Feed.created_at.desc()).offset(skip).limit(limit).all()
+
+# 게시글 단일 조회
+@app.get("/feeds/{feed_id}", response_model=FeedOut)
+async def get_feed(feed_id: int, db: Session = Depends(get_db)):
+    feed = db.query(Feed).filter(Feed.id == feed_id).first()
+    if not feed:
+        raise HTTPException(status_code=404, detail="게시글을 찾을 수 없습니다.")
+    return feed
+
+# 게시글 수정
+@app.put("/feeds/{feed_id}", response_model=FeedOut)
+async def update_feed(
+    feed_id: int,
+    content: Optional[str] = None,
+    image: UploadFile = File(None),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    feed = db.query(Feed).filter(Feed.id == feed_id).first()
+    if not feed:
+        raise HTTPException(status_code=404, detail="게시글을 찾을 수 없습니다.")
+    if feed.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="수정 권한이 없습니다.")
+    if content is not None:
+        feed.content = content
+    if image:
+        upload_dir = "uploads"
+        os.makedirs(upload_dir, exist_ok=True)
+        file_path = os.path.join(upload_dir, image.filename)
+        with open(file_path, "wb") as f:
+            f.write(await image.read())
+        feed.image_url = f"/{file_path}"
+    feed.updated_at = datetime.utcnow().isoformat()
+    db.commit()
+    db.refresh(feed)
+    return feed
+
+# 게시글 삭제
+@app.delete("/feeds/{feed_id}")
+async def delete_feed(feed_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    feed = db.query(Feed).filter(Feed.id == feed_id).first()
+    if not feed:
+        raise HTTPException(status_code=404, detail="게시글을 찾을 수 없습니다.")
+    if feed.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="삭제 권한이 없습니다.")
+    db.delete(feed)
+    db.commit()
+    return {"message": "삭제되었습니다."} 
