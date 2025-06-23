@@ -6,6 +6,8 @@ from pydantic import BaseModel, EmailStr
 import bcrypt
 from jose import JWTError, jwt
 from datetime import datetime, timedelta
+from fastapi.security import OAuth2PasswordBearer
+from fastapi import status
 
 app = FastAPI()
 
@@ -93,4 +95,30 @@ def login(form_data: UserCreate, db: Session = Depends(get_db)):
     # JWT 토큰 생성
     to_encode = {"sub": str(user.id), "exp": datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)}
     access_token = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-    return {"access_token": access_token, "token_type": "bearer"} 
+    return {"access_token": access_token, "token_type": "bearer"}
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/login")
+
+# JWT 토큰에서 사용자 정보 추출
+async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        user_id: str = payload.get("sub")
+        if user_id is None:
+            raise credentials_exception
+    except JWTError:
+        raise credentials_exception
+    user = db.query(User).filter(User.id == int(user_id)).first()
+    if user is None:
+        raise credentials_exception
+    return user
+
+# 인증 테스트용 엔드포인트
+@app.get("/me", response_model=UserOut)
+async def read_users_me(current_user: User = Depends(get_current_user)):
+    return current_user 
