@@ -4,6 +4,8 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 from pydantic import BaseModel, EmailStr
 import bcrypt
+from jose import JWTError, jwt
+from datetime import datetime, timedelta
 
 app = FastAPI()
 
@@ -38,6 +40,10 @@ class UserOut(BaseModel):
     class Config:
         orm_mode = True
 
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+
 def get_db():
     db = SessionLocal()
     try:
@@ -71,4 +77,20 @@ def signup(user: UserCreate, db: Session = Depends(get_db)):
     db.add(db_user)
     db.commit()
     db.refresh(db_user)
-    return db_user 
+    return db_user
+
+@app.post("/login", response_model=Token)
+def login(form_data: UserCreate, db: Session = Depends(get_db)):
+    # email 또는 username으로 사용자 조회
+    user = db.query(User).filter(
+        (User.email == form_data.email) | (User.username == form_data.username)
+    ).first()
+    if not user:
+        raise HTTPException(status_code=400, detail="존재하지 않는 사용자입니다.")
+    # 비밀번호 검증
+    if not bcrypt.checkpw(form_data.password.encode('utf-8'), user.password.encode('utf-8')):
+        raise HTTPException(status_code=400, detail="비밀번호가 일치하지 않습니다.")
+    # JWT 토큰 생성
+    to_encode = {"sub": str(user.id), "exp": datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)}
+    access_token = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return {"access_token": access_token, "token_type": "bearer"} 
