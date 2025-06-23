@@ -1,5 +1,5 @@
 from fastapi import FastAPI, HTTPException, Depends, File, UploadFile
-from sqlalchemy import Column, Integer, String, create_engine
+from sqlalchemy import Column, Integer, String, create_engine, and_
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 from pydantic import BaseModel, EmailStr
@@ -69,6 +69,40 @@ class FeedOut(BaseModel):
     updated_at: str
     class Config:
         from_attributes = True
+
+class Comment(Base):
+    __tablename__ = "comments"
+    id = Column(Integer, primary_key=True, index=True)
+    feed_id = Column(Integer, nullable=False)
+    user_id = Column(Integer, nullable=False)
+    content = Column(String, nullable=False)
+    created_at = Column(String, default=lambda: datetime.utcnow().isoformat())
+
+class CommentCreate(BaseModel):
+    feed_id: int
+    content: str
+
+class CommentOut(BaseModel):
+    id: int
+    feed_id: int
+    user_id: int
+    content: str
+    created_at: str
+    class Config:
+        from_attributes = True
+
+class Like(Base):
+    __tablename__ = "likes"
+    id = Column(Integer, primary_key=True, index=True)
+    feed_id = Column(Integer, nullable=False)
+    user_id = Column(Integer, nullable=False)
+
+# 팔로우 모델
+class Follow(Base):
+    __tablename__ = "follows"
+    id = Column(Integer, primary_key=True, index=True)
+    follower_id = Column(Integer, nullable=False)  # 팔로우하는 사람
+    following_id = Column(Integer, nullable=False)  # 팔로우 받는 사람
 
 def get_db():
     db = SessionLocal()
@@ -227,4 +261,104 @@ async def delete_feed(feed_id: int, current_user: User = Depends(get_current_use
         raise HTTPException(status_code=403, detail="삭제 권한이 없습니다.")
     db.delete(feed)
     db.commit()
-    return {"message": "삭제되었습니다."} 
+    return {"message": "삭제되었습니다."}
+
+# 댓글 작성
+@app.post("/comments", response_model=CommentOut)
+async def create_comment(
+    comment: CommentCreate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    db_comment = Comment(
+        feed_id=comment.feed_id,
+        user_id=current_user.id,
+        content=comment.content,
+        created_at=datetime.utcnow().isoformat()
+    )
+    db.add(db_comment)
+    db.commit()
+    db.refresh(db_comment)
+    return db_comment
+
+# 피드별 댓글 조회
+@app.get("/feeds/{feed_id}/comments", response_model=List[CommentOut])
+async def get_comments(feed_id: int, db: Session = Depends(get_db)):
+    return db.query(Comment).filter(Comment.feed_id == feed_id).order_by(Comment.created_at.asc()).all()
+
+# 댓글 삭제
+@app.delete("/comments/{comment_id}")
+async def delete_comment(comment_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    comment = db.query(Comment).filter(Comment.id == comment_id).first()
+    if not comment:
+        raise HTTPException(status_code=404, detail="댓글을 찾을 수 없습니다.")
+    if comment.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="삭제 권한이 없습니다.")
+    db.delete(comment)
+    db.commit()
+    return {"message": "삭제되었습니다."}
+
+# 좋아요 토글
+@app.post("/feeds/{feed_id}/like")
+async def toggle_like(feed_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    like = db.query(Like).filter(and_(Like.feed_id == feed_id, Like.user_id == current_user.id)).first()
+    if like:
+        db.delete(like)
+        db.commit()
+        return {"message": "좋아요 취소"}
+    else:
+        new_like = Like(feed_id=feed_id, user_id=current_user.id)
+        db.add(new_like)
+        db.commit()
+        return {"message": "좋아요"}
+
+# 피드별 좋아요 개수 조회
+@app.get("/feeds/{feed_id}/likes")
+async def get_like_count(feed_id: int, db: Session = Depends(get_db)):
+    count = db.query(Like).filter(Like.feed_id == feed_id).count()
+    return {"count": count}
+
+# 팔로우 토글
+@app.post("/users/{user_id}/follow")
+async def toggle_follow(user_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if user_id == current_user.id:
+        raise HTTPException(status_code=400, detail="자신을 팔로우할 수 없습니다.")
+    
+    follow = db.query(Follow).filter(and_(Follow.follower_id == current_user.id, Follow.following_id == user_id)).first()
+    if follow:
+        db.delete(follow)
+        db.commit()
+        return {"message": "언팔로우"}
+    else:
+        new_follow = Follow(follower_id=current_user.id, following_id=user_id)
+        db.add(new_follow)
+        db.commit()
+        return {"message": "팔로우"}
+
+# 팔로워 개수 조회
+@app.get("/users/{user_id}/followers/count")
+async def get_follower_count(user_id: int, db: Session = Depends(get_db)):
+    count = db.query(Follow).filter(Follow.following_id == user_id).count()
+    return {"count": count}
+
+# 팔로잉 개수 조회
+@app.get("/users/{user_id}/following/count")
+async def get_following_count(user_id: int, db: Session = Depends(get_db)):
+    count = db.query(Follow).filter(Follow.follower_id == user_id).count()
+    return {"count": count}
+
+# 팔로워 목록 조회
+@app.get("/users/{user_id}/followers")
+async def get_followers(user_id: int, db: Session = Depends(get_db)):
+    followers = db.query(Follow).filter(Follow.following_id == user_id).all()
+    user_ids = [f.follower_id for f in followers]
+    users = db.query(User).filter(User.id.in_(user_ids)).all()
+    return users
+
+# 팔로잉 목록 조회
+@app.get("/users/{user_id}/following")
+async def get_following(user_id: int, db: Session = Depends(get_db)):
+    following = db.query(Follow).filter(Follow.follower_id == user_id).all()
+    user_ids = [f.following_id for f in following]
+    users = db.query(User).filter(User.id.in_(user_ids)).all()
+    return users 
